@@ -1,11 +1,12 @@
-﻿import SwiftUI
+import SwiftUI
+import Combine
 
-/// 个人中心页 ViewModel（最终优化版）。
+/// 个人中心页 ViewModel（阶段 2：安装状态 Core Data 迁移版）。
 ///
 /// 设计目标：
 /// 1. 承接账号与同步、隐私设置、帮助反馈、开源声明的全部状态。
 /// 2. 与 ProfileView 交互保持一致（Toggle、按钮点击、提示弹窗）。
-/// 3. 复用 `MockDataProvider` 提供统一假数据。
+/// 3. 保留 `MockDataProvider` 的静态文案数据，但安装数量改为本地真实数据。
 @MainActor
 final class ProfileViewModel: ObservableObject {
     // MARK: - Published State
@@ -40,7 +41,7 @@ final class ProfileViewModel: ObservableObject {
     /// 免责声明摘要。
     @Published var disclaimerSummary: String = ""
 
-    /// 已安装技能数量（复用 SkillItem 统一模型）。
+    /// 已安装技能数量（本地 Core Data 真值）。
     @Published var installedSkillCount: Int = 0
 
     /// 弹窗提示文案。
@@ -56,6 +57,19 @@ final class ProfileViewModel: ObservableObject {
 
     /// 防止重复初始化加载。
     private var hasLoaded: Bool = false
+
+    /// 安装状态仓储（统一 Core Data 访问入口）。
+    private let skillRepository: SkillRepositoryProtocol
+
+    /// 通知订阅集合。
+    private var cancellables: Set<AnyCancellable> = []
+
+    // MARK: - Init
+
+    init(skillRepository: SkillRepositoryProtocol = SkillRepository.shared) {
+        self.skillRepository = skillRepository
+        observeInstallationChanges()
+    }
 
     // MARK: - Derived State
 
@@ -82,7 +96,7 @@ final class ProfileViewModel: ObservableObject {
             currentAccountEmail = snapshot.accountEmail
             isAutoSyncEnabled = true
             lastSyncDescription = snapshot.lastSyncDescription
-            installedSkillCount = MockDataProvider.installedSkills().count
+            installedSkillCount = try skillRepository.installedSkillCount()
 
             licenseName = snapshot.licenseName
             projectNature = snapshot.projectNature
@@ -155,6 +169,31 @@ final class ProfileViewModel: ObservableObject {
     private func presentAlert(_ message: String) {
         alertMessage = message
         showAlert = true
+    }
+
+    /// 监听安装状态变更通知，实时刷新安装数量。
+    private func observeInstallationChanges() {
+        NotificationCenter.default
+            .publisher(for: .skillInstallationDidChange)
+            .sink { [weak self] _ in
+                guard let self else { return }
+
+                Task { @MainActor in
+                    self.refreshInstalledSkillCountIfNeeded()
+                }
+            }
+            .store(in: &cancellables)
+    }
+
+    /// 页面已加载后刷新安装数量，避免未加载时触发无意义更新。
+    private func refreshInstalledSkillCountIfNeeded() {
+        guard hasLoaded else { return }
+
+        do {
+            installedSkillCount = try skillRepository.installedSkillCount()
+        } catch {
+            presentAlert("安装数量刷新失败：\(error.localizedDescription)")
+        }
     }
 }
 

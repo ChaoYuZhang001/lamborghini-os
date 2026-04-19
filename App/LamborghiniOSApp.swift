@@ -116,7 +116,7 @@ final class AppStateViewModel: ObservableObject {
     private func bootstrap() async {
         do {
             // MVP 阶段先做 Siri 权限状态检查（不强制拦截，确保体验与合规平衡）。
-            _ = await checkSiriAuthorizationStatus()
+            _ = await SiriShortcutService.shared.requestAuthorizationIfNeeded()
 
             hasCheckedSiriAuthorization = true
             isBootstrapping = false

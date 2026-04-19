@@ -131,17 +131,13 @@ private extension MarketView {
                             .padding(.horizontal, 12)
                             .padding(.vertical, 8)
                             .background(
-                                Group {
-                                    if viewModel.selectedCategory == category {
-                                        HomeTheme.badgeGradient
-                                    } else {
-                                        LinearGradient(
-                                            colors: [Color.white.opacity(0.08), Color.white.opacity(0.06)],
-                                            startPoint: .leading,
-                                            endPoint: .trailing
-                                        )
-                                    }
-                                },
+                                viewModel.selectedCategory == category
+                                    ? HomeTheme.badgeGradient
+                                    : LinearGradient(
+                                        colors: [Color.white.opacity(0.08), Color.white.opacity(0.06)],
+                                        startPoint: .leading,
+                                        endPoint: .trailing
+                                    ),
                                 in: Capsule()
                             )
                             .overlay(

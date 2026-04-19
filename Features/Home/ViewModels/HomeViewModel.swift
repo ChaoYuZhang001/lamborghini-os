@@ -1,12 +1,13 @@
-﻿import SwiftUI
+import SwiftUI
 import Intents
+import Combine
 
-/// 首页 ViewModel（最终优化版）。
+/// 首页 ViewModel（阶段 2：安装状态 Core Data 迁移版）。
 ///
 /// 设计目标：
 /// 1. 承接 Home 页全部状态与业务逻辑，View 层只负责布局。
 /// 2. 全量统一使用 `SkillItem` 模型，保证与市场页/我的技能页一致。
-/// 3. 使用 `MockDataProvider` 作为统一假数据入口。
+/// 3. 保留 `MockDataProvider` 作为目录源，安装状态真值统一来自 `SkillRepository`。
 @MainActor
 final class HomeViewModel: ObservableObject {
     // MARK: - Published State
@@ -20,7 +21,7 @@ final class HomeViewModel: ObservableObject {
     /// 正在安装中的技能 ID 集合。
     @Published var installingSkillIDs: Set<String> = []
 
-    /// 已安装技能 ID 集合。
+    /// 已安装技能 ID 集合（来自 Core Data）。
     @Published var installedSkillIDs: Set<String> = []
 
     /// 页面是否处于初始加载中。
@@ -39,6 +40,19 @@ final class HomeViewModel: ObservableObject {
 
     /// 缓存全量技能源，确保推荐区/热门区安装状态同步一致。
     private var cachedSkills: [SkillItem] = []
+
+    /// 安装状态仓储（统一 Core Data 访问入口）。
+    private let skillRepository: SkillRepositoryProtocol
+
+    /// 通知订阅集合。
+    private var cancellables: Set<AnyCancellable> = []
+
+    // MARK: - Init
+
+    init(skillRepository: SkillRepositoryProtocol = SkillRepository.shared) {
+        self.skillRepository = skillRepository
+        observeInstallationChanges()
+    }
 
     // MARK: - Public Actions
 
@@ -62,7 +76,11 @@ final class HomeViewModel: ObservableObject {
             // 模拟接口耗时，保留真实异步节奏。
             try await Task.sleep(nanoseconds: 220_000_000)
 
+            // 目录数据来源仍为 Mock。
             cachedSkills = MockDataProvider.marketSkills()
+
+            // 安装态统一以 Core Data 覆盖。
+            cachedSkills = try skillRepository.applyInstallationState(to: cachedSkills)
             applySnapshot(from: cachedSkills)
         } catch is CancellationError {
             // 页面切换触发取消时静默处理。
@@ -97,7 +115,12 @@ final class HomeViewModel: ObservableObject {
             // 模拟安装耗时。
             try await Task.sleep(nanoseconds: 420_000_000)
 
-            markInstalled(skillID: skill.id, isInstalled: true)
+            // 安装写入 Core Data。
+            try skillRepository.install(skill: skill, installedAt: Date())
+
+            // 基于本地真值刷新首页卡片状态。
+            cachedSkills = try skillRepository.applyInstallationState(to: cachedSkills)
+            applySnapshot(from: cachedSkills)
 
             let permissionTip = siriPermissionTip()
             let base = "“\(skill.title)”安装成功，已加入我的技能。"
@@ -132,15 +155,6 @@ final class HomeViewModel: ObservableObject {
         installedSkillIDs = Set(sorted.filter(\.isInstalled).map(\.id))
     }
 
-    /// 更新技能安装状态并同步到展示层。
-    private func markInstalled(skillID: String, isInstalled: Bool) {
-        if let index = cachedSkills.firstIndex(where: { $0.id == skillID }) {
-            cachedSkills[index].isInstalled = isInstalled
-        }
-
-        applySnapshot(from: cachedSkills)
-    }
-
     /// 根据 Siri 权限状态补充提示。
     private func siriPermissionTip() -> String? {
         switch INPreferences.siriAuthorizationStatus() {
@@ -159,5 +173,31 @@ final class HomeViewModel: ObservableObject {
     private func presentAlert(message: String) {
         alertMessage = message
         showAlert = true
+    }
+
+    /// 监听安装状态通知，确保首页与市场/我的技能页状态一致。
+    private func observeInstallationChanges() {
+        NotificationCenter.default
+            .publisher(for: .skillInstallationDidChange)
+            .sink { [weak self] _ in
+                guard let self else { return }
+
+                Task { @MainActor in
+                    self.refreshInstallationStateIfNeeded()
+                }
+            }
+            .store(in: &cancellables)
+    }
+
+    /// 页面已加载后刷新安装状态。
+    private func refreshInstallationStateIfNeeded() {
+        guard hasLoaded else { return }
+
+        do {
+            cachedSkills = try skillRepository.applyInstallationState(to: cachedSkills)
+            applySnapshot(from: cachedSkills)
+        } catch {
+            presentAlert(message: "首页安装状态刷新失败：\(error.localizedDescription)")
+        }
     }
 }

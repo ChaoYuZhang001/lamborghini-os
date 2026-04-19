@@ -1,11 +1,12 @@
-﻿import SwiftUI
+import SwiftUI
+import Combine
 
-/// 技能市场页 ViewModel（最终优化版）。
+/// 技能市场页 ViewModel（阶段 2：安装状态 Core Data 迁移版）。
 ///
 /// 设计目标：
 /// 1. 承接市场页全部交互状态：搜索、分类筛选、安装状态、提示弹窗。
 /// 2. 全量统一使用 `SkillItem` 模型。
-/// 3. 使用 `MockDataProvider` 作为统一假数据入口。
+/// 3. 保留 `MockDataProvider` 作为目录源，安装状态真值统一来自 `SkillRepository`。
 @MainActor
 final class MarketViewModel: ObservableObject {
     // MARK: - Published State
@@ -36,10 +37,23 @@ final class MarketViewModel: ObservableObject {
     /// 防止重复初始化加载。
     private var hasLoaded: Bool = false
 
+    /// 安装状态仓储（统一 Core Data 访问入口）。
+    private let skillRepository: SkillRepositoryProtocol
+
+    /// 通知订阅集合。
+    private var cancellables: Set<AnyCancellable> = []
+
     // MARK: - Static Config
 
     /// 分类展示顺序（固定顺序，避免枚举顺序变化影响 UI）。
     let categoryOrder: [SkillCategory] = [.all, .work, .life, .creativity, .travel, .health]
+
+    // MARK: - Init
+
+    init(skillRepository: SkillRepositoryProtocol = SkillRepository.shared) {
+        self.skillRepository = skillRepository
+        observeInstallationChanges()
+    }
 
     // MARK: - Derived State
 
@@ -79,7 +93,12 @@ final class MarketViewModel: ObservableObject {
         do {
             // 模拟异步加载耗时。
             try await Task.sleep(nanoseconds: 200_000_000)
+
+            // 目录数据来源仍为 Mock。
             allSkills = MockDataProvider.marketSkills()
+
+            // 安装态以本地 Core Data 覆盖目录默认值。
+            allSkills = try skillRepository.applyInstallationState(to: allSkills)
         } catch is CancellationError {
             // 页面切换取消任务时静默处理。
         } catch {
@@ -114,7 +133,12 @@ final class MarketViewModel: ObservableObject {
         do {
             // 模拟安装耗时。
             try await Task.sleep(nanoseconds: 420_000_000)
-            allSkills[index].isInstalled = true
+
+            // 安装写入统一仓储（Core Data）。
+            try skillRepository.install(skill: allSkills[index], installedAt: Date())
+
+            // 安装后刷新本地展示状态。
+            allSkills = try skillRepository.applyInstallationState(to: allSkills)
             presentAlert("“\(allSkills[index].title)”安装成功，已加入我的技能。")
         } catch is CancellationError {
             presentAlert("安装已取消，请稍后重试。")
@@ -141,5 +165,30 @@ final class MarketViewModel: ObservableObject {
     private func presentAlert(_ message: String) {
         alertMessage = message
         showAlert = true
+    }
+
+    /// 监听安装状态变更通知，确保与首页/我的技能页状态一致。
+    private func observeInstallationChanges() {
+        NotificationCenter.default
+            .publisher(for: .skillInstallationDidChange)
+            .sink { [weak self] _ in
+                guard let self else { return }
+
+                Task { @MainActor in
+                    self.refreshInstallationStateIfNeeded()
+                }
+            }
+            .store(in: &cancellables)
+    }
+
+    /// 页面已加载后，刷新安装状态但不打断筛选与搜索上下文。
+    private func refreshInstallationStateIfNeeded() {
+        guard hasLoaded else { return }
+
+        do {
+            allSkills = try skillRepository.applyInstallationState(to: allSkills)
+        } catch {
+            presentAlert("安装状态刷新失败：\(error.localizedDescription)")
+        }
     }
 }

@@ -1,11 +1,12 @@
-﻿import SwiftUI
+import SwiftUI
+import Combine
 
-/// 我的技能页 ViewModel（最终优化版）。
+/// 我的技能页 ViewModel（阶段 2：安装状态 Core Data 迁移版）。
 ///
 /// 设计目标：
 /// 1. 承接已安装技能列表、执行状态、Siri 入口与提示弹窗状态。
-/// 2. 全量统一使用 `SkillItem` 模型，并复用统一 Mock 数据入口。
-/// 3. 通过 `SiriShortcutService` 统一管理 Siri 权限与入口提示逻辑。
+/// 2. 全量统一使用 `SkillItem` 模型，技能目录来源仍为 `MockDataProvider`。
+/// 3. 已安装列表真值来自 `SkillRepository`（Core Data）。
 @MainActor
 final class MySkillsViewModel: ObservableObject {
     // MARK: - Published State
@@ -30,15 +31,26 @@ final class MySkillsViewModel: ObservableObject {
     /// Siri 短语服务（可替换为测试桩）。
     private let siriShortcutService: SiriShortcutServiceProtocol
 
+    /// 安装状态仓储（统一 Core Data 访问入口）。
+    private let skillRepository: SkillRepositoryProtocol
+
     // MARK: - Private State
 
     /// 防止重复初始化加载。
     private var hasLoaded: Bool = false
 
+    /// 通知订阅集合。
+    private var cancellables: Set<AnyCancellable> = []
+
     // MARK: - Init
 
-    init(siriShortcutService: SiriShortcutServiceProtocol = SiriShortcutService.shared) {
+    init(
+        siriShortcutService: SiriShortcutServiceProtocol = SiriShortcutService.shared,
+        skillRepository: SkillRepositoryProtocol = SkillRepository.shared
+    ) {
         self.siriShortcutService = siriShortcutService
+        self.skillRepository = skillRepository
+        observeInstallationChanges()
     }
 
     // MARK: - Derived State
@@ -66,7 +78,7 @@ final class MySkillsViewModel: ObservableObject {
         do {
             // 模拟异步加载耗时。
             try await Task.sleep(nanoseconds: 180_000_000)
-            installedSkills = MockDataProvider.installedSkills()
+            try refreshInstalledSkillsFromLocal()
         } catch is CancellationError {
             // 页面切换取消任务时静默处理。
         } catch {
@@ -89,6 +101,9 @@ final class MySkillsViewModel: ObservableObject {
         do {
             // 模拟快捷指令执行耗时。
             try await Task.sleep(nanoseconds: 520_000_000)
+
+            // 执行成功后回写最后执行时间（本地记录）。
+            try skillRepository.markExecuted(skillID: skill.id, executedAt: Date())
             presentAlert("“\(skill.title)”已执行完成。")
         } catch is CancellationError {
             presentAlert("执行已取消，请稍后重试。")
@@ -101,19 +116,6 @@ final class MySkillsViewModel: ObservableObject {
     func openSiriShortcutEntry(for skill: SkillItem) async {
         let message = await siriShortcutService.buildShortcutEntryMessage(for: skill)
         presentAlert(message)
-    }
-
-    /// 外部注入已安装技能（便于后续接收市场页安装结果）。
-    func upsertInstalledSkill(_ skill: SkillItem) {
-        if let index = installedSkills.firstIndex(where: { $0.id == skill.id }) {
-            installedSkills[index] = skill
-            installedSkills[index].isInstalled = true
-        } else {
-            var installed = skill
-            installed.isInstalled = true
-            installedSkills.append(installed)
-            installedSkills.sort(by: { $0.rank < $1.rank })
-        }
     }
 
     // MARK: - Query Helpers
@@ -129,5 +131,40 @@ final class MySkillsViewModel: ObservableObject {
     private func presentAlert(_ message: String) {
         alertMessage = message
         showAlert = true
+    }
+
+    /// 监听安装状态变更通知，确保与首页/市场页状态一致。
+    private func observeInstallationChanges() {
+        NotificationCenter.default
+            .publisher(for: .skillInstallationDidChange)
+            .sink { [weak self] _ in
+                guard let self else { return }
+
+                Task { @MainActor in
+                    self.refreshInstalledSkillsIfNeeded()
+                }
+            }
+            .store(in: &cancellables)
+    }
+
+    /// 页面已加载后刷新已安装列表。
+    private func refreshInstalledSkillsIfNeeded() {
+        guard hasLoaded else { return }
+
+        do {
+            try refreshInstalledSkillsFromLocal()
+        } catch {
+            presentAlert("我的技能状态刷新失败：\(error.localizedDescription)")
+        }
+    }
+
+    /// 基于本地安装记录刷新已安装技能列表。
+    ///
+    /// 说明：
+    /// - 目录数据仍来自 Mock。
+    /// - 最终是否已安装由 Core Data 决定。
+    private func refreshInstalledSkillsFromLocal() throws {
+        let catalog = MockDataProvider.marketSkills()
+        installedSkills = try skillRepository.fetchInstalledSkills(from: catalog)
     }
 }
